@@ -589,6 +589,7 @@ RECEIVABLES_OUT = {}
 # seguintes ao fim do mes, a lista de renovacao do mes ANTERIOR e recalculada todo dia e gravada
 # (so o campo renewalReport) no documento mensal daquele mes — ver client_report_prev_month*.json.
 CLIENT_PREV_OUT = {}
+SALES_PREV_OUT = {}
 RENOVACAO_PRAZO_DIAS = 30
 
 
@@ -1051,7 +1052,7 @@ def build_for_unit(unit):
 
         RETORNO_GAP_DAYS = 30
 
-        def sale_type_for(idm, sale_date_d):
+        def sale_type_for(idm, sale_date_d, id_sale=None):
             # Pedido do usuario em 2026-09-25 (4a correcao do dia): alem de novo/renovacao/retorno,
             # tambem retorna se uma "renovacao" e ANTECIPADA — cliente comprou o novo contrato antes
             # do mes-calendario em que o contrato anterior realmente venceria (_endEfetivo em mes/ano
@@ -1071,7 +1072,11 @@ def build_for_unit(unit):
             # 27/07-11/08/2026, nova venda 03/09/2026: antes contava como Renovacao (23 dias apos a
             # cortesia), agora conta como Retorno (2+ anos sem plano pago). Se o cliente so teve
             # cortesia antes, a venda conta como "novo".
+            # Pedido do usuario em 2026-10-01: o proprio contrato desta venda nao pode entrar como
+            # "anterior" — quando o inicio e retroativo (ex. Marina Rondon: vendido em 01/10 com inicio
+            # 30/09) ele virava o "ultimo contrato" e a venda caia como Renovacao Antecipada.
             earlier = [c for c in contracts if c["_start"] and c["_start"] < sale_date_d and not is_transfer_record(c)
+                       and not (id_sale is not None and c.get("idSale") == id_sale)
                        and "cortesia" not in _strip_accents((c.get("nameMembership") or "").strip().lower())]
             if not earlier:
                 return "novo", None, None
@@ -1109,7 +1114,12 @@ def build_for_unit(unit):
             e = member_cache.get(idm, {}) if idm else {}
             member = s.get("member") or {}
             nome = " ".join(x for x in [member.get("firstName"), member.get("lastName")] if x).strip() or None
-            tipo_venda, renovacao_antecipada, renovacao_tardia = sale_type_for(idm, sale_date_d)
+            # Pedido do usuario em 2026-10-01: venda para quem ainda nao e cliente (ex. "PROFISSIONAL DE ALTA
+            # PERMORMANCE", vendida a prospects) vinha sem nome — usa o nome do prospect.
+            if not nome:
+                _pr = s.get("prospect") or {}
+                nome = " ".join(x for x in [_pr.get("firstName"), _pr.get("lastName")] if x).strip() or None
+            tipo_venda, renovacao_antecipada, renovacao_tardia = sale_type_for(idm, sale_date_d, s.get("idSale"))
             # Pedido do usuario em 2026-09-29: marca se essa venda e uma TROCA DE CONTRATO detectada
             # automaticamente (cancelamento + venda nova com Adesao no mesmo dia/dia seguinte — ver
             # build_contract_swap_report/troca_sale_ids_mes). Usada abaixo pra excluir essas vendas
@@ -1120,7 +1130,10 @@ def build_for_unit(unit):
                 plano = it.get("item")
                 items.append({
                     "idSale": s["idSale"], "idMember": idm, "nome": nome,
-                    "plano": plano, "categoria": categorize_sale_item(plano), "valor": round(val, 2),
+                    # Pedido do usuario em 2026-10-01: na unidade Fitness nada e classificado como Piscina —
+                    # ex. item "MENSALIDADE" (Luanda Gabryeli, R$ 429, 06/09/2026) caia em "Piscina
+                    # (recorrente)" pela palavra "mensal". No Fitness vira Fitness.
+                    "plano": plano, "categoria": ("Fitness (Anual/Assinatura/Plus)" if (unit["key"] == "fitness" and categorize_sale_item(plano) == "Piscina (recorrente)") else categorize_sale_item(plano)), "valor": round(val, 2),
                     "dataVenda": sale_date, "consultor": e.get("consultor"), "tipoVenda": tipo_venda,
                     # Pedido do usuario em 2026-09-25 (4a correcao do dia): so preenchido (True/False)
                     # quando tipoVenda == "renovacao" — ver comentario em sale_type_for().
@@ -1301,6 +1314,38 @@ def build_for_unit(unit):
     # usuario pedir.
     troca_auto_ids_mes = set(troca_sale_ids_mes)
     troca_sale_ids_mes |= _MANUAL_TROCA_SALE_IDS.get(unit["key"], set())
+
+    # Pedido do usuario em 2026-10-01: venda feita no ultimo dia do mes DEPOIS da ultima coleta (ex.
+    # Marcela Gama, 30/09) ficava de fora para sempre, e cancelamentos lancados depois tambem nao
+    # entravam. Do dia 1 ao 5, o relatorio de vendas do MES ANTERIOR e recalculado inteiro e
+    # regravado (sales_report_prev_month*.json). Usa as trocas de contrato daquele mes.
+    if TODAY.day <= 5:
+        _troca_cur = troca_sale_ids_mes
+        try:
+            _pv_end = month_start - datetime.timedelta(days=1)
+            _pv_start = _pv_end.replace(day=1)
+            _pv_auto = {it["idSaleNova"] for it in contract_swap_report["items"]
+                        if _pv_start.isoformat() <= it["dataVendaNova"][:10] <= _pv_end.isoformat() and it.get("idSaleNova") is not None}
+            troca_sale_ids_mes = _pv_auto | _MANUAL_TROCA_SALE_IDS.get(unit["key"], set())
+            _pv = build_sales_report(_pv_start, _pv_end)
+            _pv_doc = dict(_pv)
+            _pv_doc["monthKey"] = _pv_end.strftime("%Y-%m")
+            _pv_auto_items = [m for m in contract_swap_report["items"] if m.get("idSaleNova") in _pv_auto]
+            _pv_man = [it for it in _pv["items"] if it["idSale"] in troca_sale_ids_mes and it["idSale"] not in _pv_auto]
+            _pv_doc["countTrocaContratoMes"] = len(_pv_auto_items) + len({it["idSale"] for it in _pv_man})
+            _pv_doc["valorTrocaContratoMes"] = round(sum(m["valorVendaNova"] for m in _pv_auto_items) + sum(it["valor"] for it in _pv_man), 2)
+            _pv_fest = [it for it in _pv["items"] if "festival" in _strip_accents((it.get("plano") or "").lower()) and it["idSale"] not in troca_sale_ids_mes]
+            _pv_doc["countFestivalMes"] = len(_pv_fest)
+            _pv_doc["valorFestivalMes"] = round(sum(it["valor"] for it in _pv_fest), 2)
+            _pv_doc["totalValueAjustado"] = round(_pv["totalValue"] - _pv_doc["valorTrocaContratoMes"] - _pv_doc["valorFestivalMes"], 2)
+            _pv_doc["recalculadoEm"] = TODAY.isoformat()
+            _pv_doc["updatedAt"] = datetime.datetime.utcnow().isoformat() + "Z"
+            SALES_PREV_OUT[unit["key"]] = _pv_doc
+            print(f"[{unit['key']}] vendas do mes anterior recalculadas: total={_pv['total']} value={_pv['totalValue']}", file=sys.stderr)
+        except Exception as e:
+            print(f"[{unit['key']}] vendas do mes anterior falharam (resto segue normal): {e}", file=sys.stderr)
+        finally:
+            troca_sale_ids_mes = _troca_cur
 
     sales_report_this_month = build_sales_report(month_start, month_end)
     print(f"[{unit['key']}] sales this month: total={sales_report_this_month['total']} value={sales_report_this_month['totalValue']}", file=sys.stderr)
@@ -1672,6 +1717,9 @@ if __name__ == "__main__":
         if unit["key"] + ":next" in RECEIVABLES_OUT:
             with open(f"receivables_report_next_month{suf and '_' + suf.lower()}.json", "w") as f:
                 json.dump(RECEIVABLES_OUT[unit["key"] + ":next"], f, ensure_ascii=False)
+        if unit["key"] in SALES_PREV_OUT:
+            with open(f"sales_report_prev_month{suf and '_' + suf.lower()}.json", "w") as f:
+                json.dump(SALES_PREV_OUT[unit["key"]], f, ensure_ascii=False, indent=2)
         if unit["key"] in CLIENT_PREV_OUT:
             with open(f"client_report_prev_month{suf and '_' + suf.lower()}.json", "w") as f:
                 json.dump(CLIENT_PREV_OUT[unit["key"]], f, ensure_ascii=False, indent=2)
