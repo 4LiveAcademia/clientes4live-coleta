@@ -201,6 +201,8 @@ def build_contract_swap_report(api_get_raw, api_get, api_base_mgmt, api_base_v2,
 
 
 def load_rows(xlsx_bytes):
+    if not xlsx_bytes:
+        return []
     wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes))
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
