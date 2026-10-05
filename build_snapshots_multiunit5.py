@@ -76,7 +76,11 @@ def get_recent_entries(api_get_raw, days=90, recent_days=7, all_dates_out=None):
     skip = 0
     last_by_member = {}
     recent_dates_by_member = {}
-    cutoff = (end - datetime.timedelta(days=recent_days - 1)).date().isoformat()
+    # Pedido do usuario em 2026-10-05: janela de "visitas nos ultimos 7 dias" = os 7 dias
+    # COMPLETOS anteriores a coleta (ex.: coleta de 05/10 conta de 28/09 a 04/10); o dia da coleta
+    # fica de fora porque a coleta roda de madrugada, antes das aulas.
+    cutoff = (end - datetime.timedelta(days=recent_days)).date().isoformat()
+    cutoff_end = end.date().isoformat()
     while True:
         url = f"{API_BASE_ROOT}/api/v1/entries?registerDateStart={start.isoformat()}&registerDateEnd={end.isoformat()}&take={take}&skip={skip}"
         data = json.loads(api_get_raw(url))
@@ -88,7 +92,7 @@ def get_recent_entries(api_get_raw, days=90, recent_days=7, all_dates_out=None):
             d10 = d[:10]
             if idm not in last_by_member or d10 > last_by_member[idm]:
                 last_by_member[idm] = d10
-            if d10 >= cutoff:
+            if cutoff <= d10 < cutoff_end:
                 recent_dates_by_member.setdefault(idm, set()).add(d10)
             if all_dates_out is not None:
                 all_dates_out.setdefault(idm, set()).add(d10)
@@ -1529,7 +1533,9 @@ def build_for_unit(unit):
         turma_matched = 0
         RECENT_TURMA_DAYS = 14
         recent_turma_cutoff = (TODAY - datetime.timedelta(days=RECENT_TURMA_DAYS - 1)).isoformat()
-        window7_cutoff = (TODAY - datetime.timedelta(days=6)).isoformat()
+        # Pedido do usuario em 2026-10-05: 7 dias completos anteriores a coleta (D-7 a D-1).
+        window7_cutoff = (TODAY - datetime.timedelta(days=7)).isoformat()
+        window7_end = TODAY.isoformat()
         lookback_start = TODAY - datetime.timedelta(days=89)
         t_freq0 = time.time()
 
@@ -1549,7 +1555,7 @@ def build_for_unit(unit):
                 recent = [r for r in records if (r.get("date") or "")[:10] >= recent_turma_cutoff]
                 turma = ", ".join(sorted(set(r.get("activitieName") for r in recent if r.get("activitieName")))) or None
                 professor = ", ".join(sorted(set((r.get("instructor") or "").strip() for r in recent if (r.get("instructor") or "").strip()))) or None
-                within7 = [r for r in records if (r.get("date") or "")[:10] >= window7_cutoff]
+                within7 = [r for r in records if window7_cutoff <= (r.get("date") or "")[:10] < window7_end]
                 visitas7d = sum(1 for r in within7 if r.get("presenca"))
                 presencas = [r["date"][:10] for r in records if r.get("presenca") and r.get("date")]
                 ultima_freq = max(presencas) if presencas else None
@@ -1584,6 +1590,8 @@ def build_for_unit(unit):
         frequencia_report = {
             "date": TODAY.isoformat(), "total": len(freq_list),
             "comMatriculaTurma": turma_matched,
+            "janelaInicio": window7_cutoff,
+            "janelaFim": (TODAY - datetime.timedelta(days=1)).isoformat(),
             "byFreqContratada": by_freq_contratada,
             "list": freq_list,
             "updatedAt": datetime.datetime.utcnow().isoformat() + "Z",
