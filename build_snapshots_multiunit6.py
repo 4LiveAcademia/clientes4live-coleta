@@ -965,6 +965,13 @@ def build_for_unit(unit):
         contracts_by_member.setdefault(c["idMember"], []).append(c)
     for _lst in contracts_by_member.values():
         _lst.sort(key=lambda x: x["_start"] or datetime.date.min)
+    # Pedido do usuario em 2026-10-08: upgrade/downgrade de plano nao e contrato vencendo. O EVO marca o
+    # contrato NOVO com membershipSwapData.flMembershipSwapped = True e aponta o antigo em
+    # idMemberMembershipSource; o antigo (encerrado na data da troca) sai de "Contratos vencendo"
+    # (igual ao relatorio de renovacao do EVO — ex. Piscina out/2026: Hugo, Manoel e Marcelo).
+    swapped_sources = {(c.get("membershipSwapData") or {}).get("idMemberMembershipSource") for c in all_contracts
+                       if (c.get("membershipSwapData") or {}).get("flMembershipSwapped")}
+    swapped_sources.discard(None)
 
     def current_contract_for(idm):
         contracts = [c for c in (contracts_by_member.get(idm) or []) if not is_transfer_record(c)]
@@ -1044,6 +1051,8 @@ def build_for_unit(unit):
                 if not (range_start <= c["_end"] <= range_end):
                     continue
                 if is_transfer_record(c):
+                    continue
+                if c.get("idMemberMemberShip") in swapped_sources:
                     continue
                 if is_excluded_from_renewals(c.get("nameMembership")):
                     continue
