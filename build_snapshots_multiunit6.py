@@ -972,6 +972,13 @@ def build_for_unit(unit):
     swapped_sources = {(c.get("membershipSwapData") or {}).get("idMemberMembershipSource") for c in all_contracts
                        if (c.get("membershipSwapData") or {}).get("flMembershipSwapped")}
     swapped_sources.discard(None)
+    # Pedido do usuario em 2026-10-12: a VENDA do contrato novo de um upgrade/downgrade (o mesmo
+    # flMembershipSwapped acima) tambem e troca de contrato no relatorio de vendas, nao Renovacao/Novo.
+    # O heuristico de build_contract_swap_report nao pegava esses casos porque o EVO nao cancela o
+    # contrato antigo nem cobra adesao (Piscina out/2026: Hugo 12591, Manoel 12592, Marcelo 12598).
+    swapped_sale_ids = {c.get("idSale") for c in all_contracts
+                        if (c.get("membershipSwapData") or {}).get("flMembershipSwapped")}
+    swapped_sale_ids.discard(None)
 
     def current_contract_for(idm):
         contracts = [c for c in (contracts_by_member.get(idm) or []) if not is_transfer_record(c)]
@@ -1038,6 +1045,8 @@ def build_for_unit(unit):
     total_leads = len(prospects)
     converted = [r for r in prospects if str(r.get("Status")).strip().upper() == "CLIENTE"]
 
+    turma_cache = {}
+
     def build_renewal_report(range_start, range_end):
         due = []
         for idm, contracts in contracts_by_member.items():
@@ -1093,10 +1102,33 @@ def build_for_unit(unit):
             for m in extra_members:
                 member_cache[m["idMember"]] = {"consultor": m.get("nameEmployeeConsultant"), "professor": m.get("nameEmployeeInstructor")}
 
+        # Pedido do usuario em 2026-10-22: na Piscina o EVO nao traz professor no cadastro, entao o
+        # professor da renovacao vem da TURMA que o aluno frequentou (chamada das aulas nos ultimos
+        # 120 dias; vale a turma mais recente — aulas ate 14 dias antes da ultima). Fica gravado no
+        # item (professorTurma/turma), assim quem ja saiu da turma continua com o professor no mes.
+        def turma_do_aluno(idm):
+            if idm in turma_cache:
+                return turma_cache[idm]
+            res = (None, None)
+            try:
+                recs = get_member_activity_sessions(api_get_raw, idm, TODAY - datetime.timedelta(days=119), TODAY)
+                recs = [r for r in recs if (r.get("date") or "")[:10]]
+                if recs:
+                    _ult = max(r["date"][:10] for r in recs)
+                    _corte = (datetime.date.fromisoformat(_ult) - datetime.timedelta(days=13)).isoformat()
+                    rec = [r for r in recs if r["date"][:10] >= _corte]
+                    res = (", ".join(sorted(set((r.get("instructor") or "").strip() for r in rec if (r.get("instructor") or "").strip()))) or None,
+                           ", ".join(sorted(set(r.get("activitieName") for r in rec if r.get("activitieName")))) or None)
+            except Exception as ex:
+                print(f"[{unit['key']}] turma do aluno {idm} falhou: {ex}", file=sys.stderr)
+            turma_cache[idm] = res
+            return res
+
         items = []
         renewed = not_renewed_n = 0
         for idm, c, is_renewed, is_tardio, ren_start in due:
             e = member_cache.get(idm, {})
+            prof_turma, turma_nome = turma_do_aluno(idm) if unit["key"] == "piscina" else (None, None)
             is_future_due = c["_end"] > TODAY
             status = "renovado" if is_renewed else ("a_vencer" if is_future_due else "nao_renovado")
             ult, a30, a90 = access_stats(idm)
@@ -1109,6 +1141,7 @@ def build_for_unit(unit):
                 "ultimoAcesso": ult, "acessos30d": a30, "acessos90d": a90,
                 # Pedido do usuario em 2026-10-01: renovou depois do mes do vencimento (dentro dos 30 dias).
                 "renovadoTardio": is_tardio, "renovadoEm": ren_start.isoformat() if ren_start else None,
+                "professorTurma": prof_turma, "turma": turma_nome,
             })
             if is_renewed:
                 renewed += 1
@@ -1415,6 +1448,7 @@ def build_for_unit(unit):
     # usuario pedir.
     troca_auto_ids_mes = set(troca_sale_ids_mes)
     troca_sale_ids_mes |= _MANUAL_TROCA_SALE_IDS.get(unit["key"], set())
+    troca_sale_ids_mes |= swapped_sale_ids
 
     # Pedido do usuario em 2026-10-01: venda feita no ultimo dia do mes DEPOIS da ultima coleta (ex.
     # Marcela Gama, 30/09) ficava de fora para sempre, e cancelamentos lancados depois tambem nao
@@ -1427,7 +1461,7 @@ def build_for_unit(unit):
             _pv_start = _pv_end.replace(day=1)
             _pv_auto = {it["idSaleNova"] for it in contract_swap_report["items"]
                         if _pv_start.isoformat() <= it["dataVendaNova"][:10] <= _pv_end.isoformat() and it.get("idSaleNova") is not None}
-            troca_sale_ids_mes = _pv_auto | _MANUAL_TROCA_SALE_IDS.get(unit["key"], set())
+            troca_sale_ids_mes = _pv_auto | _MANUAL_TROCA_SALE_IDS.get(unit["key"], set()) | swapped_sale_ids
             _pv = build_sales_report(_pv_start, _pv_end)
             _pv_doc = dict(_pv)
             _pv_doc["monthKey"] = _pv_end.strftime("%Y-%m")
