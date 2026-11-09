@@ -913,7 +913,8 @@ def build_for_unit(unit):
     # Pedido do usuario em 2026-10-01: modo RECALCULO de mes fechado. Com COLETA_DATA_REF=AAAA-MM-DD
     # (ultimo dia do mes), o script calcula o relatorio de clientes daquele mes com as regras atuais
     # (cancelamentos sem trocas, valor perdido = saldo, renovacao com prazo de 30 dias, leads) e grava
-    # SO client_report_backfill*.json — nada de snapshot, vendas, recebiveis ou listas. Usado para
+    # client_report_backfill*.json, sales_report_backfill*.json e receivables_report_backfill*.json —
+    # nada de snapshot nem listas (vendas e recebiveis incluidos em 2026-11-09). Usado para
     # corrigir julho e agosto/2026, gravados em 16/09 com as regras antigas.
     TODAY = datetime.date.fromisoformat(os.environ["COLETA_DATA_REF"]) if os.environ.get("COLETA_DATA_REF") else datetime.date.today()
     month_start, month_end = month_bounds(TODAY)
@@ -1844,7 +1845,21 @@ if __name__ == "__main__":
             _bf["recalculadoEm"] = datetime.date.today().isoformat()
             with open(f"client_report_backfill{suf and '_' + suf.lower()}.json", "w") as f:
                 json.dump(_bf, f, ensure_ascii=False, indent=2)
-            print(f"[{unit['key']}] done. backfill {_bf['monthKey']}", file=sys.stderr)
+            # Pedido do usuario em 2026-11-09: o recalculo de mes fechado tambem grava vendas e
+            # recebimentos daquele mes (para preencher o historico de jan-set/2026 no painel novo).
+            # Recebimentos refletem o status ATUAL de cada parcela (pagas depois do mes aparecem pagas).
+            _sv = dict(sales_doc)
+            _sv["recalculadoEm"] = datetime.date.today().isoformat()
+            with open(f"sales_report_backfill{suf and '_' + suf.lower()}.json", "w") as f:
+                json.dump(_sv, f, ensure_ascii=False, indent=2)
+            if unit["key"] in RECEIVABLES_OUT:
+                _rv = dict(RECEIVABLES_OUT[unit["key"]])
+                _rv["recalculadoEm"] = datetime.date.today().isoformat()
+                with open(f"receivables_report_backfill{suf and '_' + suf.lower()}.json", "w") as f:
+                    json.dump(_rv, f, ensure_ascii=False)
+            else:
+                print(f"[{unit['key']}] recebimentos do backfill indisponiveis (ver erro acima)", file=sys.stderr)
+            print(f"[{unit['key']}] done. backfill {_bf['monthKey']} (clientes, vendas, recebimentos)", file=sys.stderr)
             continue
         with open(f"snapshot_v3{suf and '_' + suf.lower()}.json", "w") as f:
             json.dump(snap, f, ensure_ascii=False, indent=2)
